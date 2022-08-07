@@ -1,0 +1,733 @@
+Binary files xv6/.git/index and xv6-public/.git/index differ
+diff -ruN xv6/.git/logs/HEAD xv6-public/.git/logs/HEAD
+--- xv6/.git/logs/HEAD	2021-10-31 15:20:34.450938700 +0530
++++ xv6-public/.git/logs/HEAD	2021-10-23 10:18:17.211427100 +0530
+@@ -1 +1 @@
+-0000000000000000000000000000000000000000 eeb7b415dbcb12cc362d0783e41c3d1f44066b17 kartheek <kartheek@Kartheek.localdomain> 1635673834 +0530	clone: from https://github.com/mit-pdos/xv6-public
++0000000000000000000000000000000000000000 eeb7b415dbcb12cc362d0783e41c3d1f44066b17 kartheek <kartheek@Kartheek.localdomain> 1634964497 +0530	clone: from https://github.com/mit-pdos/xv6-public
+diff -ruN xv6/.git/logs/refs/heads/master xv6-public/.git/logs/refs/heads/master
+--- xv6/.git/logs/refs/heads/master	2021-10-31 15:20:34.487508700 +0530
++++ xv6-public/.git/logs/refs/heads/master	2021-10-23 10:18:17.225418100 +0530
+@@ -1 +1 @@
+-0000000000000000000000000000000000000000 eeb7b415dbcb12cc362d0783e41c3d1f44066b17 kartheek <kartheek@Kartheek.localdomain> 1635673834 +0530	clone: from https://github.com/mit-pdos/xv6-public
++0000000000000000000000000000000000000000 eeb7b415dbcb12cc362d0783e41c3d1f44066b17 kartheek <kartheek@Kartheek.localdomain> 1634964497 +0530	clone: from https://github.com/mit-pdos/xv6-public
+diff -ruN xv6/.git/logs/refs/remotes/origin/HEAD xv6-public/.git/logs/refs/remotes/origin/HEAD
+--- xv6/.git/logs/refs/remotes/origin/HEAD	2021-10-31 15:20:34.313783800 +0530
++++ xv6-public/.git/logs/refs/remotes/origin/HEAD	2021-10-23 10:18:17.135698100 +0530
+@@ -1 +1 @@
+-0000000000000000000000000000000000000000 eeb7b415dbcb12cc362d0783e41c3d1f44066b17 kartheek <kartheek@Kartheek.localdomain> 1635673834 +0530	clone: from https://github.com/mit-pdos/xv6-public
++0000000000000000000000000000000000000000 eeb7b415dbcb12cc362d0783e41c3d1f44066b17 kartheek <kartheek@Kartheek.localdomain> 1634964497 +0530	clone: from https://github.com/mit-pdos/xv6-public
+diff -ruN xv6/Makefile xv6-public/Makefile
+--- xv6/Makefile	2021-10-31 15:20:34.752617100 +0530
++++ xv6-public/Makefile	2021-10-26 20:42:07.855093800 +0530
+@@ -181,6 +181,7 @@
+ 	_usertests\
+ 	_wc\
+ 	_zombie\
++	_memtest\
+ 
+ fs.img: mkfs README $(UPROGS)
+ 	./mkfs fs.img README $(UPROGS)
+diff -ruN xv6/defs.h xv6-public/defs.h
+--- xv6/defs.h	2021-10-31 15:20:34.873635000 +0530
++++ xv6-public/defs.h	2021-10-26 21:31:17.487323500 +0530
+@@ -9,6 +9,7 @@
+ struct sleeplock;
+ struct stat;
+ struct superblock;
++struct reqque;
+ 
+ // bio.c
+ void            binit(void);
+@@ -120,6 +121,17 @@
+ int             wait(void);
+ void            wakeup(void*);
+ void            yield(void);
++void 			create_kernel_process(const char *name, void (*entrypoint)());
++void swapoutcode();
++void swapincode();
++extern int swapoutpresent;
++extern int swapinpresent;
++extern struct reqque swapinque;
++extern struct reqque swapoutque;
++struct proc *rqpop();
++struct proc *rqpop2();
++int rqpush(struct proc *p);
++int rqpush2(struct proc *p);
+ 
+ // swtch.S
+ void            swtch(struct context**, struct context*);
+@@ -164,6 +176,7 @@
+ extern uint     ticks;
+ void            tvinit(void);
+ extern struct spinlock tickslock;
++extern struct spinlock swap_in_lock;
+ 
+ // uart.c
+ void            uartinit(void);
+@@ -185,6 +198,9 @@
+ void            switchkvm(void);
+ int             copyout(pde_t*, uint, void*, uint);
+ void            clearpteu(pde_t *pgdir, char *uva);
++extern int sleepcount;
++extern char *sleepchannel;
++extern struct spinlock sleepinglock;
+ 
+ // number of elements in fixed-size array
+ #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
+diff -ruN xv6/kalloc.c xv6-public/kalloc.c
+--- xv6/kalloc.c	2021-10-31 15:20:35.011506900 +0530
++++ xv6-public/kalloc.c	2021-10-26 20:48:21.719581500 +0530
+@@ -65,7 +65,7 @@
+     panic("kfree");
+ 
+   // Fill with junk to catch dangling refs.
+-  memset(v, 1, PGSIZE);
++  memset(v,1, PGSIZE);
+ 
+   if(kmem.use_lock)
+     acquire(&kmem.lock);
+@@ -74,6 +74,18 @@
+   kmem.freelist = r;
+   if(kmem.use_lock)
+     release(&kmem.lock);
++
++  // changed
++  if(kmem.use_lock){
++    acquire(&sleepinglock);
++  }
++  if(sleepcount){
++    wakeup(sleepchannel);
++    sleepcount=0;
++  }
++  if(kmem.use_lock){
++    release(&sleepinglock);
++  }
+ }
+ 
+ // Allocate one 4096-byte page of physical memory.
+diff -ruN xv6/memtest.c xv6-public/memtest.c
+--- xv6/memtest.c	1970-01-01 05:30:00.000000000 +0530
++++ xv6-public/memtest.c	2021-10-27 17:03:54.833300200 +0530
+@@ -0,0 +1,44 @@
++#include "types.h"
++#include "stat.h"
++#include "user.h"
++
++int func(int num){
++	return num*num+1;
++}
++
++int
++main(int argc, char* argv[]){
++
++	for(int i=0;i<20;i++){
++		if(!fork()){
++			printf(1, "Child %d\n", i+1);
++			printf(1, "Iteration Matched Different\n");
++			printf(1, "--------- ------- ---------\n\n");
++			
++			for(int j=0;j<10;j++){
++				int *arr = malloc(4096);
++				for(int k=0;k<1024;k++){
++					arr[k] = func(k);
++				}
++				int matched=0;
++				for(int k=0;k<1024;k++){
++					if(arr[k] == func(k))
++						matched+=4;
++				}
++				
++				if(j<9)
++					printf(1, "    %d      %dB      %dB\n", j+1, matched, 4096-matched);
++				else
++					printf(1, "   %d      %dB      %dB\n", j+1, matched, 4096-matched);
++				
++			}
++			printf(1, "\n");
++			
++			exit();
++		}
++	}
++
++	while(wait()!=-1);
++	exit();
++
++}
+diff -ruN xv6/mmu.h xv6-public/mmu.h
+--- xv6/mmu.h	2021-10-31 15:20:35.112566100 +0530
++++ xv6-public/mmu.h	2021-10-26 19:46:14.344028200 +0530
+@@ -94,6 +94,7 @@
+ #define PTE_P           0x001   // Present
+ #define PTE_W           0x002   // Writeable
+ #define PTE_U           0x004   // User
++#define PTE_A           0x020   //Accessed
+ #define PTE_PS          0x080   // Page Size
+ 
+ // Address in page table or page directory entry
+diff -ruN xv6/param.h xv6-public/param.h
+--- xv6/param.h	2021-10-31 15:20:35.131265500 +0530
++++ xv6-public/param.h	2021-10-27 08:44:44.131584500 +0530
+@@ -1,6 +1,6 @@
+ #define NPROC        64  // maximum number of processes
+ #define KSTACKSIZE 4096  // size of per-process kernel stack
+-#define NCPU          8  // maximum number of CPUs
++#define NCPU          1  // maximum number of CPUs
+ #define NOFILE       16  // open files per process
+ #define NFILE       100  // open files per system
+ #define NINODE       50  // maximum number of active i-nodes
+diff -ruN xv6/proc.c xv6-public/proc.c
+--- xv6/proc.c	2021-10-31 15:20:35.195584200 +0530
++++ xv6-public/proc.c	2021-10-30 11:33:02.608367300 +0530
+@@ -6,6 +6,349 @@
+ #include "x86.h"
+ #include "proc.h"
+ #include "spinlock.h"
++#include "fcntl.h"
++#include "sleeplock.h"
++#include "fs.h"
++#include "file.h"
++#include "stat.h"
++
++int swapoutpresent = 0;
++int swapinpresent = 0;
++
++int mappages(pde_t *pgdir, void *va, uint size, uint pa, int perm);
++
++int
++proc_close(int fd)
++{
++  struct file *f;
++
++  if(fd < 0 || fd >= NOFILE || (f=myproc()->ofile[fd]) == 0)
++    return -1;
++  
++  myproc()->ofile[fd] = 0;
++  fileclose(f);
++  return 0;
++}
++
++int
++proc_write(int fd, char *p, int n)
++{
++  struct file *f;
++  if(fd < 0 || fd >= NOFILE || (f=myproc()->ofile[fd]) == 0)
++    return -1;
++  return filewrite(f, p, n);
++}
++
++
++static struct inode*
++proc_create(char *path, short type, short major, short minor)
++{
++  struct inode *ip, *dp;
++  char name[DIRSIZ];
++
++  if((dp = nameiparent(path, name)) == 0)
++    return 0;
++  ilock(dp);
++
++  if((ip = dirlookup(dp, name, 0)) != 0){
++    iunlockput(dp);
++    ilock(ip);
++    if(type == T_FILE && ip->type == T_FILE)
++      return ip;
++    iunlockput(ip);
++    return 0;
++  }
++
++  if((ip = ialloc(dp->dev, type)) == 0)
++    panic("create: ialloc");
++
++  ilock(ip);
++  ip->major = major;
++  ip->minor = minor;
++  ip->nlink = 1;
++  iupdate(ip);
++
++  if(type == T_DIR){  // Create . and .. entries.
++    dp->nlink++;  // for ".."
++    iupdate(dp);
++    // No ip->nlink++ for ".": avoid cyclic ref count.
++    if(dirlink(ip, ".", ip->inum) < 0 || dirlink(ip, "..", dp->inum) < 0)
++      panic("create dots");
++  }
++
++  if(dirlink(dp, name, ip->inum) < 0)
++    panic("create: dirlink");
++
++  iunlockput(dp);
++
++  return ip;
++}
++
++
++static int
++proc_fdalloc(struct file *f)
++{
++  int fd;
++  struct proc *curproc = myproc();
++
++  for(fd = 0; fd < NOFILE; fd++){
++    if(curproc->ofile[fd] == 0){
++      curproc->ofile[fd] = f;
++      return fd;
++    }
++  }
++  return -1;
++}
++
++int proc_open(char *path, int omode){
++
++  int fd;
++  struct file *f;
++  struct inode *ip;
++
++  begin_op();
++
++  if(omode & O_CREATE){
++    ip = proc_create(path, T_FILE, 0, 0);
++    if(ip == 0){
++      end_op();
++      return -1;
++    }
++  } else {
++    if((ip = namei(path)) == 0){
++      end_op();
++      return -1;
++    }
++    ilock(ip);
++    if(ip->type == T_DIR && omode != O_RDONLY){
++      iunlockput(ip);
++      end_op();
++      return -1;
++    }
++  }
++
++  if((f = filealloc()) == 0 || (fd = proc_fdalloc(f)) < 0){
++    if(f)
++      fileclose(f);
++    iunlockput(ip);
++    end_op();
++    return -1;
++  }
++  iunlock(ip);
++  end_op();
++
++  f->type = FD_INODE;
++  f->ip = ip;
++  f->off = 0;
++  f->readable = !(omode & O_WRONLY);
++  f->writable = (omode & O_WRONLY) || (omode & O_RDWR);
++  return fd;
++
++}
++int proc_read(int fd, int n, char *p)
++{
++  struct file *f;
++  if(fd < 0 || fd >= NOFILE || (f=myproc()->ofile[fd]) == 0)
++  return -1;
++  return fileread(f, p, n);
++
++}
++// data structure for ready queue
++struct reqque{
++  int start;
++  int end;
++  struct spinlock lock;
++  struct proc* queue[NPROC];
++};
++
++// queue for swapping out and push pop code implemented
++struct reqque swapoutque;
++
++struct proc* rqpop(){
++  acquire(&swapoutque.lock);
++  if(swapoutque.start==swapoutque.end){
++    release(&swapoutque.lock);
++    return 0;
++  }
++  struct proc *p = swapoutque.queue[swapoutque.start];
++  (swapoutque.start)++;
++  (swapoutque.start)%=NPROC;
++  release(&swapoutque.lock);
++  return p;
++}
++
++int rqpush(struct proc* p){
++  acquire(&swapoutque.lock);
++  if(swapoutque.start==(swapoutque.end+1)%NPROC){
++    release(&swapoutque.lock);
++    return 0;
++  }
++  swapoutque.queue[swapoutque.end]=p;
++  swapoutque.end++;
++  (swapoutque.end)%=NPROC;
++  release(&swapoutque.lock);
++  return 1;
++}
++
++// swpping in requests queu and implement push and pop
++struct reqque swapinque;
++
++struct proc* rqpop2(){
++  acquire(&swapinque.lock);
++  if(swapinque.start==swapinque.end){
++    release(&swapinque.lock);
++    return 0;
++  }
++  struct proc *p = swapinque.queue[swapinque.start];
++  (swapinque.start)++;
++  (swapinque.start)%=NPROC;
++  release(&swapinque.lock);
++  return p;
++}
++
++int rqpush2(struct proc* p){
++  acquire(&swapinque.lock);
++  if(swapinque.start==(swapinque.end+1)%NPROC){
++    release(&swapinque.lock);
++    return 0;
++  }
++  swapinque.queue[swapinque.end]=p;
++  swapinque.end++;
++  (swapinque.end)%=NPROC;
++  release(&swapinque.lock);
++  return 1;
++}
++
++void int_to_string(int x, char *c){
++  if(x==0)
++  {
++    c[0]='0';
++    c[1]='\0';
++    return;
++  }
++  int i=0;
++  while(x>0){
++    c[i]=x%10+'0';
++    i++;
++    x/=10;
++  }
++  c[i]='\0';
++
++  for(int j=0;j<i/2;j++){
++    char a=c[j];
++    c[j]=c[i-j-1];
++    c[i-j-1]=a;
++  }
++
++}
++
++void swapoutcode(){
++  acquire(&swapoutque.lock);
++  while (swapoutque.start!=swapoutque.end)
++  {
++    struct proc *p = rqpop();
++    pde_t* pgdirectory = p->pgdir;
++    for(int i=0;i<NPDENTRIES;i++){
++      if(pgdirectory[i]&PTE_A){
++        continue;
++      }
++      pte_t *pgtable = (pte_t*)P2V(PTE_ADDR(pgdirectory[i]));
++      for(int j=0;j<NPTENTRIES;j++){
++        if((pgtable[j]&PTE_A) || !(pgtable[j]&PTE_P)){
++          continue;
++        }
++        pte_t *pte = (pte_t*)P2V(PTE_ADDR(pgtable[j]));
++
++        int pid = p->pid;
++        int virt = ((1<<22)*i) + ((1<<12)*j);
++
++        char filename[50];
++        int_to_string(pid,filename);
++        int tem = strlen(filename);
++        filename[tem] = '_';
++        int_to_string(virt,filename+tem+1);
++        safestrcpy(filename+strlen(filename),".swp",5);
++
++        int fd=proc_open(filename, O_CREATE | O_RDWR);
++        if(fd<0){
++          cprintf("error creating or opening file: %s\n", filename);
++          panic("swap_out_process");
++        }
++
++        if(proc_write(fd,(char *)pte, PGSIZE) != PGSIZE){
++          cprintf("error writing to file: %s\n", filename);
++          panic("swap_out_process");
++        }
++        proc_close(fd);
++
++        kfree((char*)pte);
++        memset(&pgtable[j],0,sizeof(pgtable[j]));
++
++        //mark this page as being swapped out.
++        pgtable[j]=((pgtable[j])^(0x080));
++
++        break;
++      }
++    }
++  }
++  release(&swapoutque.lock);
++
++  struct proc *p;
++  if((p=myproc())==0){
++    panic("SWAPOUTCODE");
++  }
++  swapoutpresent = 0;
++  p->parent = 0;
++  p->name[0]='#';
++  p->killed = 0;
++  p->state = UNUSED;
++  sched();  
++}
++
++void swapincode(){
++   acquire(&swapinque.lock);
++  while (swapinque.start!=swapinque.end)
++  {
++    struct proc *p = rqpop2();
++
++        int pid = p->pid;
++        int virt = PTE_ADDR(p->addr);
++
++        char filename[50];
++        int_to_string(pid,filename);
++        int tem = strlen(filename);
++        filename[tem] = '_';
++        int_to_string(virt,filename+tem+1);
++        safestrcpy(filename+strlen(filename),".swp",5);
++      int fd=proc_open(filename,O_RDONLY);
++	    if(fd<0){
++	    	release(&swapinque.lock);
++	    	cprintf("could not find page file in memory: %s\n", filename);
++	    	panic("swap_in_process");
++	    }
++	    char *mem=kalloc();
++	    proc_read(fd,PGSIZE,mem);
++
++	    if(mappages(p->pgdir, (void *)virt, PGSIZE, V2P(mem), PTE_W|PTE_U)<0){
++	    	release(&swapinque.lock);
++	    	panic("mappages");
++	    }
++	    wakeup(p);
++
++  }
++  release(&swapinque.lock);
++
++  struct proc *p;
++  if((p=myproc())==0){
++    panic("SWAPINCODE");
++  }
++  swapinpresent = 0;
++  p->parent = 0;
++  p->name[0]='#';
++  p->killed = 0;
++  p->state = UNUSED;
++  sched();
++}
+ 
+ struct {
+   struct spinlock lock;
+@@ -24,6 +367,9 @@
+ pinit(void)
+ {
+   initlock(&ptable.lock, "ptable");
++  initlock(&swapoutque.lock,"swapoutque");
++  initlock(&swapinque.lock,"swapinque");
++  initlock(&sleepinglock,"sleepinglock");
+ }
+ 
+ // Must be called with interrupts disabled
+@@ -118,8 +464,19 @@
+ //PAGEBREAK: 32
+ // Set up first user process.
+ void
+-userinit(void)
+-{
++userinit(void){
++  acquire(&swapoutque.lock);
++  swapoutque.start=0;
++  swapoutque.end = 0;
++  release(&swapoutque.lock);
++
++  acquire(&swapinque.lock);
++  swapinque.start=0;
++  swapinque.end = 0;
++  release(&swapinque.lock);
++
++  // already existed code from here.
++
+   struct proc *p;
+   extern char _binary_initcode_start[], _binary_initcode_size[];
+ 
+@@ -333,9 +690,28 @@
+     // Loop over process table looking for process to run.
+     acquire(&ptable.lock);
+     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
++    if(p->state==UNUSED && p->name[0]=='#'){
++        kfree(p->kstack);
++        p->kstack=0;
++        p->name[0]=0;
++        p->pid=0;
++      }  
++
+       if(p->state != RUNNABLE)
+         continue;
+ 
++      for(int i=0;i<NPDENTRIES;i++){
++        if(((p->pgdir)[i])&PTE_P && ((p->pgdir)[i])&PTE_A){
++          pte_t* pgtab = (pte_t*)P2V(PTE_ADDR((p->pgdir)[i]));
++          for(int j=0;j<NPTENTRIES;j++){
++            if(pgtab[j]&PTE_A){
++              pgtab[j]^=PTE_A;
++            }
++          }
++          ((p->pgdir)[i])^=PTE_A;
++        }
++      }
++
+       // Switch to chosen process.  It is the process's job
+       // to release ptable.lock and then reacquire it
+       // before jumping back to us.
+@@ -532,3 +908,19 @@
+     cprintf("\n");
+   }
+ }
++
++void create_kernel_process(const char *name, void(*entrypoint)()){
++  struct proc *p = allocproc();
++  if(p==0){
++    panic("Allocation failed");
++  }
++  p->pgdir = setupkvm();
++  if(!p->pgdir){
++    panic("Kernel space setup unsuccesful");
++  }
++  p->context->eip = (uint)entrypoint;
++  safestrcpy(p->name,name,sizeof(name));
++  acquire(&ptable.lock);
++  p->state = RUNNABLE;
++  release(&ptable.lock);
++}
+\ No newline at end of file
+diff -ruN xv6/proc.h xv6-public/proc.h
+--- xv6/proc.h	2021-10-31 15:20:35.201551700 +0530
++++ xv6-public/proc.h	2021-10-26 20:29:58.574888700 +0530
+@@ -49,6 +49,7 @@
+   struct file *ofile[NOFILE];  // Open files
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
++  int addr;
+ };
+ 
+ // Process memory is laid out contiguously, low addresses first:
+diff -ruN xv6/trap.c xv6-public/trap.c
+--- xv6/trap.c	2021-10-31 15:20:35.377328400 +0530
++++ xv6-public/trap.c	2021-10-27 08:44:26.609950000 +0530
+@@ -14,6 +14,30 @@
+ struct spinlock tickslock;
+ uint ticks;
+ 
++struct spinlock swap_in_lock;
++
++void handler(){
++  int addr=rcr2();
++  struct proc *p=myproc();
++  acquire(&swap_in_lock);
++  sleep(p,&swap_in_lock);
++  pde_t *pde = &(p->pgdir)[PDX(addr)];
++  pte_t *pgtab = (pte_t*)P2V(PTE_ADDR(*pde));
++
++  if((pgtab[PTX(addr)])&0x080){
++    //This means that the page was swapped out.
++    //virtual address for page
++    p->addr = addr;
++    rqpush2(p);
++    if(!swapinpresent){
++      swapinpresent=1;
++      create_kernel_process("swapinprocess", &swapincode);
++    }
++  } else {
++    exit();
++  }
++}
++
+ void
+ tvinit(void)
+ {
+@@ -47,6 +71,10 @@
+   }
+ 
+   switch(tf->trapno){
++
++  case T_PGFLT:
++    handler();
++    break;
+   case T_IRQ0 + IRQ_TIMER:
+     if(cpuid() == 0){
+       acquire(&tickslock);
+@@ -102,9 +130,9 @@
+ 
+   // Force process to give up CPU on clock tick.
+   // If interrupts were on while locks held, would need to check nlock.
+-  if(myproc() && myproc()->state == RUNNING &&
+-     tf->trapno == T_IRQ0+IRQ_TIMER)
+-    yield();
++  // if(myproc() && myproc()->state == RUNNING &&
++  //    tf->trapno == T_IRQ0+IRQ_TIMER)
++  //   yield();
+ 
+   // Check if the process has been killed since we yielded
+   if(myproc() && myproc()->killed && (tf->cs&3) == DPL_USER)
+diff -ruN xv6/vm.c xv6-public/vm.c
+--- xv6/vm.c	2021-10-31 15:20:35.458589000 +0530
++++ xv6-public/vm.c	2021-10-26 21:00:59.091422800 +0530
+@@ -6,12 +6,17 @@
+ #include "mmu.h"
+ #include "proc.h"
+ #include "elf.h"
++#include "spinlock.h"
+ 
+ extern char data[];  // defined by kernel.ld
+ pde_t *kpgdir;  // for use in scheduler()
+ 
+ // Set up CPU's kernel segment descriptors.
+ // Run once on entry on each CPU.
++struct spinlock sleepinglock;
++int sleepcount = 0;
++char *sleepchannel;
++
+ void
+ seginit(void)
+ {
+@@ -57,7 +62,7 @@
+ // Create PTEs for virtual addresses starting at va that refer to
+ // physical addresses starting at pa. va and size might not
+ // be page-aligned.
+-static int
++int
+ mappages(pde_t *pgdir, void *va, uint size, uint pa, int perm)
+ {
+   char *a, *last;
+@@ -233,8 +238,19 @@
+   for(; a < newsz; a += PGSIZE){
+     mem = kalloc();
+     if(mem == 0){
+-      cprintf("allocuvm out of memory\n");
++      // cprintf("allocuvm out of memory\n");
+       deallocuvm(pgdir, newsz, oldsz);
++      myproc()->state = SLEEPING;
++      acquire(&sleepinglock);
++      myproc()->chan = sleepchannel;
++      sleepcount++;
++      release(&sleepinglock);
++
++      rqpush(myproc());
++      if(swapoutpresent==0){
++        swapoutpresent = 1;
++        create_kernel_process("swapoutprocess",&swapoutcode);
++      }
+       return 0;
+     }
+     memset(mem, 0, PGSIZE);
